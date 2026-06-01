@@ -23,7 +23,10 @@ actions!(
         SelectPrevColumn,
         SelectNextColumn,
         SelectPageUp,
-        SelectPageDown
+        SelectPageDown,
+        SelectUpExtend,
+        SelectDownExtend,
+        SelectAllRows
     ]
 );
 

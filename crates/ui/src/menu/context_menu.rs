@@ -1,10 +1,13 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use gpui::{
-    Anchor, AnyElement, App, Context, DismissEvent, Element, ElementId, Entity, Focusable,
-    GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement, Styled,
-    Subscription, Window, anchored, deferred, div, prelude::FluentBuilder, px,
+    Anchor, AnyElement, App, Context, DismissEvent, Element, ElementId, Entity, FocusHandle,
+    Focusable, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, StyleRefinement,
+    Styled, Subscription, Window, anchored, deferred, div, prelude::FluentBuilder, px,
 };
 
 use crate::menu::PopupMenu;
@@ -38,11 +41,25 @@ pub trait ContextMenuExt: InteractiveElement + ParentElement + Styled {
 
 impl<E: InteractiveElement + ParentElement + Styled> ContextMenuExt for E {}
 
+#[derive(Clone, Default)]
+pub struct ContextMenuHandle(Rc<Cell<Option<Point<Pixels>>>>);
+
+impl ContextMenuHandle {
+    pub fn open_at(&self, position: Point<Pixels>) {
+        self.0.set(Some(position));
+    }
+}
+
+type MenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+
 /// A context menu that can be shown on right-click.
 pub struct ContextMenu<E: ParentElement + Styled + Sized> {
     id: ElementId,
     element: Option<E>,
-    menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
+    menu: Option<MenuBuilder>,
+    handle: Option<ContextMenuHandle>,
+    action_context: Option<FocusHandle>,
+    on_dismiss: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
     // This is not in use, just for style refinement forwarding.
     _ignore_style: StyleRefinement,
     anchor: Anchor,
@@ -55,6 +72,9 @@ impl<E: ParentElement + Styled> ContextMenu<E> {
             id: id.into(),
             element: Some(element),
             menu: None,
+            handle: None,
+            action_context: None,
+            on_dismiss: None,
             anchor: Anchor::TopLeft,
             _ignore_style: StyleRefinement::default(),
         }
@@ -67,6 +87,24 @@ impl<E: ParentElement + Styled> ContextMenu<E> {
         F: Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
     {
         self.menu = Some(Rc::new(builder));
+        self
+    }
+
+    #[must_use]
+    pub fn handle(mut self, handle: ContextMenuHandle) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
+    #[must_use]
+    pub fn action_context(mut self, handle: FocusHandle) -> Self {
+        self.action_context = Some(handle);
+        self
+    }
+
+    #[must_use]
+    pub fn on_dismiss(mut self, f: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_dismiss = Some(Rc::new(f));
         self
     }
 
@@ -264,13 +302,28 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
 
         // Take the builder before setting up element state to avoid borrow issues
         let builder = self.menu.clone();
+        let handle = self.handle.clone();
+        let action_context = self.action_context.clone();
+        let on_dismiss = self.on_dismiss.clone();
 
         self.with_element_state(
             id.unwrap(),
             window,
             cx,
-            |_view, state: &mut ContextMenuState, window, _| {
+            |_view, state: &mut ContextMenuState, window, cx| {
                 let shared_state = state.shared_state.clone();
+
+                if let Some(position) = handle.and_then(|handle| handle.0.take()) {
+                    open_menu(
+                        &shared_state,
+                        &builder,
+                        &action_context,
+                        &on_dismiss,
+                        position,
+                        window,
+                        cx,
+                    );
+                }
 
                 let hitbox = hitbox.clone();
                 // When right mouse click, to build content menu, and show it at the mouse position.
@@ -279,66 +332,85 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                         && event.button == MouseButton::Right
                         && hitbox.is_hovered(window)
                     {
-                        // Capture the focused element to restore focus to on dismiss.
-                        // If focus is still on the previous menu, keep its captured focus.
-                        let previous_focus_handle = window.focused(cx).and_then(|focused| {
-                            let shared_state = shared_state.borrow();
-                            match shared_state.menu_view.as_ref() {
-                                Some(menu) if menu.read(cx).focus_handle == focused => {
-                                    menu.read(cx).previous_focus_handle.clone()
-                                }
-                                _ => Some(focused),
-                            }
-                        });
-
-                        {
-                            let mut shared_state = shared_state.borrow_mut();
-                            // Clear any existing menu view to allow immediate replacement
-                            // Set the new position and open the menu
-                            shared_state.menu_view = None;
-                            shared_state._subscription = None;
-                            shared_state.position = event.position;
-                            shared_state.open = true;
-                        }
-
-                        // Use defer to build the menu in the next frame, avoiding race conditions
-                        window.defer(cx, {
-                            let shared_state = shared_state.clone();
-                            let builder = builder.clone();
-                            move |window, cx| {
-                                let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
-                                    let Some(build) = &builder else {
-                                        return menu;
-                                    };
-                                    build(menu, window, cx)
-                                });
-                                menu.update(cx, |menu, cx| {
-                                    menu.set_previous_focus(previous_focus_handle, cx);
-                                });
-
-                                // Set up the subscription for dismiss handling
-                                let _subscription = window.subscribe(&menu, cx, {
-                                    let shared_state = shared_state.clone();
-                                    move |_, _: &DismissEvent, window, _cx| {
-                                        shared_state.borrow_mut().open = false;
-                                        window.refresh();
-                                    }
-                                });
-
-                                // Update the shared state with the built menu and subscription
-                                {
-                                    let mut state = shared_state.borrow_mut();
-                                    state.menu_view = Some(menu.clone());
-                                    state._subscription = Some(_subscription);
-                                    window.refresh();
-                                }
-                            }
-                        });
+                        open_menu(
+                            &shared_state,
+                            &builder,
+                            &action_context,
+                            &on_dismiss,
+                            event.position,
+                            window,
+                            cx,
+                        );
                     }
                 });
             },
         );
     }
+}
+
+fn open_menu(
+    shared_state: &Rc<RefCell<ContextMenuSharedState>>,
+    builder: &Option<MenuBuilder>,
+    action_context: &Option<FocusHandle>,
+    on_dismiss: &Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    position: Point<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let previous_focus_handle = action_context.clone().or_else(|| {
+        window.focused(cx).and_then(|focused| {
+            let shared_state = shared_state.borrow();
+            match shared_state.menu_view.as_ref() {
+                Some(menu) if menu.read(cx).focus_handle == focused => {
+                    menu.read(cx).previous_focus_handle.clone()
+                }
+                _ => Some(focused),
+            }
+        })
+    });
+
+    {
+        let mut shared_state = shared_state.borrow_mut();
+        shared_state.menu_view = None;
+        shared_state._subscription = None;
+        shared_state.position = position;
+        shared_state.open = true;
+    }
+
+    window.defer(cx, {
+        let shared_state = shared_state.clone();
+        let builder = builder.clone();
+        let action_context = action_context.clone();
+        let on_dismiss = on_dismiss.clone();
+        move |window, cx| {
+            let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+                let Some(build) = &builder else {
+                    return menu;
+                };
+                build(menu, window, cx)
+            });
+            menu.update(cx, |menu, cx| {
+                menu.set_action_context(action_context, cx);
+                menu.set_previous_focus(previous_focus_handle, cx);
+            });
+
+            let subscription = window.subscribe(&menu, cx, {
+                let shared_state = shared_state.clone();
+                move |_, _: &DismissEvent, window, cx| {
+                    shared_state.borrow_mut().open = false;
+                    if let Some(on_dismiss) = &on_dismiss {
+                        on_dismiss(window, cx);
+                    }
+                    window.refresh();
+                }
+            });
+
+            let mut state = shared_state.borrow_mut();
+            state.menu_view = Some(menu);
+            state._subscription = Some(subscription);
+            window.refresh();
+        }
+    });
 }
 
 #[cfg(test)]

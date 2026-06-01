@@ -1,25 +1,25 @@
-use std::{ops::Range, rc::Rc, time::Duration};
+use std::{collections::HashSet, ops::Range, rc::Rc, time::Duration};
 
 use crate::{
     ActiveTheme, ElementExt, Icon, IconName, StyleSized as _, StyledExt, VirtualListScrollHandle,
     actions::{
-        Cancel, SelectDown, SelectFirst, SelectLast, SelectNextColumn, SelectPageDown,
-        SelectPageUp, SelectPrevColumn, SelectUp,
+        Cancel, SelectAllRows, SelectDown, SelectDownExtend, SelectFirst, SelectLast,
+        SelectNextColumn, SelectPageDown, SelectPageUp, SelectPrevColumn, SelectUp, SelectUpExtend,
     },
     h_flex,
-    menu::{ContextMenuExt, PopupMenu},
+    menu::{ContextMenuExt, ContextMenuHandle, PopupMenu},
     scroll::{ScrollableMask, Scrollbar},
     v_flex,
 };
 use gpui::{
     AppContext, Axis, Bounds, ClickEvent, Context, Div, DragMoveEvent, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ListSizingBehavior, MouseButton, MouseDownEvent,
-    ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
+    Focusable, InteractiveElement, IntoElement, ListSizingBehavior, Modifiers, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollStrategy, SharedString, Stateful,
     StatefulInteractiveElement as _, Styled, Task, UniformListScrollHandle, Window, div,
     prelude::FluentBuilder, px, uniform_list,
 };
 
-use super::*;
+use super::{selection::RowSelection, *};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum SelectionMode {
@@ -49,7 +49,13 @@ impl SelectionMode {
 #[derive(Clone)]
 pub enum TableEvent {
     /// Single click or move to selected row.
+    ///
+    /// Carries the row the cursor moved to; with [`TableState::multi_select`]
+    /// enabled the full selection may be larger — read it from
+    /// [`TableState::selected_rows`] on [`TableEvent::SelectionChanged`].
     SelectRow(usize),
+    /// The set of selected rows changed (selection, extension, or clearing).
+    SelectionChanged,
     /// Double click on the row.
     DoubleClickedRow(usize),
     /// Selected column.
@@ -72,6 +78,11 @@ pub enum TableEvent {
     ///
     /// The `Vec<Pixels>` contains the new widths of all columns.
     ColumnWidthsChanged(Vec<Pixels>),
+    /// A column's resize handle has been double-clicked.
+    ///
+    /// The `usize` is the index of the column to the left of the handle.
+    /// Use this event to reset the column to its default width.
+    DoubleClickedResizeHandle(usize),
     /// A column has been moved.
     ///
     /// The first `usize` is the original index of the column,
@@ -196,6 +207,13 @@ pub struct TableState<D: TableDelegate> {
     pub col_selectable: bool,
     /// Whether the table can select row.
     pub row_selectable: bool,
+    /// Whether more than one row can be selected at a time, default is false.
+    ///
+    /// When enabled, ⌘/Ctrl-click toggles individual rows, Shift-click and
+    /// Shift+Arrow extend a range from the anchor, and ⌘/Ctrl-A selects every
+    /// row. The row the cursor sits on is still [`Self::selected_row`]; the
+    /// whole set is [`Self::selected_rows`].
+    pub multi_select: bool,
     /// Whether the table can select cell, default is false.
     ///
     /// When enabled:
@@ -226,10 +244,12 @@ pub struct TableState<D: TableDelegate> {
     pub vertical_scroll_handle: UniformListScrollHandle,
     pub horizontal_scroll_handle: VirtualListScrollHandle,
 
-    selected_row: Option<usize>,
+    row_selection: RowSelection,
     selection_mode: SelectionMode,
     right_clicked_row: Option<usize>,
     right_clicked_cell: Option<(usize, usize)>,
+    right_clicked_header: Option<usize>,
+    context_menu: ContextMenuHandle,
     selected_col: Option<usize>,
     selected_cell: Option<(usize, usize)>,
 
@@ -263,9 +283,11 @@ where
             horizontal_scroll_handle: VirtualListScrollHandle::new(),
             vertical_scroll_handle: UniformListScrollHandle::new(),
             selection_mode: SelectionMode::Row,
-            selected_row: None,
+            row_selection: RowSelection::default(),
             right_clicked_row: None,
             right_clicked_cell: None,
+            right_clicked_header: None,
+            context_menu: ContextMenuHandle::default(),
             selected_col: None,
             selected_cell: None,
             resizing_col: None,
@@ -276,6 +298,7 @@ where
             loop_selection: true,
             col_selectable: true,
             row_selectable: true,
+            multi_select: false,
             cell_selectable: false,
             row_header: true,
             sortable: true,
@@ -327,6 +350,16 @@ where
     /// Set to enable/disable row selectable, default true
     pub fn row_selectable(mut self, row_selectable: bool) -> Self {
         self.row_selectable = row_selectable;
+        self
+    }
+
+    /// Set to enable/disable multiple row selection, default false.
+    ///
+    /// See [`Self::multi_select`] for the interactions this unlocks. With it
+    /// off, every selection change collapses to a single row, so modifier
+    /// clicks and range keys behave like plain ones.
+    pub fn multi_select(mut self, multi_select: bool) -> Self {
+        self.multi_select = multi_select;
         self
     }
 
@@ -443,35 +476,118 @@ where
         })
     }
 
-    /// Returns the selected row index.
+    /// Returns the row index the selection cursor sits on.
+    ///
+    /// With [`Self::multi_select`] enabled this is the moving end of the
+    /// selection, not its whole extent. See [`Self::selected_rows`].
     pub fn selected_row(&self) -> Option<usize> {
-        self.selected_row
+        self.row_selection.cursor()
     }
 
-    /// Sets the selected row to the given index.
+    /// Returns every selected row index.
+    ///
+    /// Holds at most one entry unless [`Self::multi_select`] is enabled. The
+    /// indices are unordered; sort them if you need display order.
+    pub fn selected_rows(&self) -> &HashSet<usize> {
+        self.row_selection.rows()
+    }
+
+    /// Sets the selected row to the given index, dropping any other selection.
     pub fn set_selected_row(&mut self, row_ix: usize, cx: &mut Context<Self>) {
-        let is_down = match self.selected_row {
-            Some(selected_row) => row_ix > selected_row,
+        cx.stop_propagation();
+        self.apply_row_selection(row_ix, Modifiers::none(), cx);
+    }
+
+    /// Replaces the selection with the given rows, ignoring out-of-range ones.
+    ///
+    /// The cursor is seated on the first selected row.
+    pub fn set_selected_rows(
+        &mut self,
+        rows: impl IntoIterator<Item = usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let rows_count = self.delegate.rows_count(cx);
+        self.selection_mode = SelectionMode::Row;
+        self.row_selection.set_rows(rows, rows_count);
+        cx.emit(TableEvent::SelectionChanged);
+        cx.notify();
+    }
+
+    /// Selects every row. No-op unless [`Self::multi_select`] is enabled.
+    pub fn select_all_rows(&mut self, cx: &mut Context<Self>) {
+        if !self.multi_select || !self.row_selectable {
+            return;
+        }
+
+        let rows_count = self.delegate.rows_count(cx);
+        self.selection_mode = SelectionMode::Row;
+        self.row_selection.select_all(rows_count);
+        cx.emit(TableEvent::SelectionChanged);
+        cx.notify();
+    }
+
+    /// Extends the selection by `delta` rows from the cursor, as Shift+Arrow
+    /// does. Falls back to plain cursor movement without [`Self::multi_select`].
+    pub fn extend_selection(&mut self, delta: i64, cx: &mut Context<Self>) {
+        self.move_row_cursor(delta, self.range_modifiers(), cx);
+    }
+
+    /// Modifiers a range gesture stands for, or none when the table is
+    /// single-select and every gesture collapses to one row.
+    fn range_modifiers(&self) -> Modifiers {
+        if self.multi_select {
+            Modifiers::shift()
+        } else {
+            Modifiers::none()
+        }
+    }
+
+    fn apply_row_selection(&mut self, row_ix: usize, modifiers: Modifiers, cx: &mut Context<Self>) {
+        let rows_count = self.delegate.rows_count(cx);
+        let is_down = match self.row_selection.cursor() {
+            Some(cursor) => row_ix > cursor,
             None => true,
         };
 
-        cx.stop_propagation();
         self.selection_mode = SelectionMode::Row;
         self.right_clicked_row = None;
-        self.selected_row = Some(row_ix);
-        if let Some(row_ix) = self.selected_row {
-            self.vertical_scroll_handle.scroll_to_item(
-                row_ix,
-                if is_down {
-                    ScrollStrategy::Bottom
-                } else {
-                    ScrollStrategy::Top
-                },
-            );
-        }
+        self.row_selection
+            .apply(row_ix, modifiers, rows_count, self.loop_selection);
+        self.scroll_to_row_edge(row_ix, is_down);
         cx.emit(TableEvent::SelectRow(row_ix));
         cx.emit(TableEvent::RightClickedRow(None));
+        cx.emit(TableEvent::SelectionChanged);
         cx.notify();
+    }
+
+    fn move_row_cursor(&mut self, delta: i64, modifiers: Modifiers, cx: &mut Context<Self>) {
+        let rows_count = self.delegate.rows_count(cx);
+        if rows_count == 0 {
+            return;
+        }
+
+        self.selection_mode = SelectionMode::Row;
+        self.right_clicked_row = None;
+        self.row_selection
+            .move_cursor(delta, modifiers, rows_count, self.loop_selection);
+
+        if let Some(cursor) = self.row_selection.cursor() {
+            self.scroll_to_row_edge(cursor, delta > 0);
+            cx.emit(TableEvent::SelectRow(cursor));
+        }
+        cx.emit(TableEvent::SelectionChanged);
+        cx.notify();
+    }
+
+    fn scroll_to_row_edge(&mut self, row_ix: usize, is_down: bool) {
+        self.vertical_scroll_handle.scroll_to_item(
+            row_ix,
+            if is_down {
+                ScrollStrategy::Bottom
+            } else {
+                ScrollStrategy::Top
+            },
+        );
     }
 
     /// Returns the row that has been right clicked.
@@ -486,6 +602,41 @@ where
     pub fn set_right_clicked_row(&mut self, row: Option<usize>, cx: &mut Context<Self>) {
         self.right_clicked_row = row;
         cx.notify();
+    }
+
+    /// Opens the row context menu for `row_ix`, as a right-click on that row
+    /// would, and anchors it to the row itself.
+    ///
+    /// For keyboard-driven callers, which have no mouse position to anchor to.
+    pub fn open_row_context_menu(&mut self, row_ix: usize, cx: &mut Context<Self>) {
+        if row_ix >= self.delegate.rows_count(cx) {
+            return;
+        }
+
+        self.right_clicked_row = Some(row_ix);
+        self.right_clicked_cell = None;
+        self.right_clicked_header = None;
+        self.context_menu.open_at(self.row_anchor(row_ix));
+        cx.emit(TableEvent::RightClickedRow(Some(row_ix)));
+        cx.notify();
+    }
+
+    /// The row's bottom-left corner in window coordinates, so the menu drops
+    /// out of the row the way it would drop out of the mouse.
+    ///
+    /// A row scrolled out of view is clamped to the nearest visible edge rather
+    /// than opening the menu off-screen.
+    fn row_anchor(&self, row_ix: usize) -> Point<Pixels> {
+        let row_height = self.options.size.table_row_height();
+        let list = self.vertical_scroll_handle.0.borrow();
+        let bounds = list.base_handle.bounds();
+        let top = bounds.top() + list.base_handle.offset().y + row_height * row_ix as f32;
+        let last_row_top = (bounds.bottom() - row_height).max(bounds.top());
+
+        gpui::point(
+            bounds.left(),
+            top.clamp(bounds.top(), last_row_top) + row_height,
+        )
     }
 
     /// Returns the selected column index.
@@ -550,10 +701,11 @@ where
     /// Clear the selection of the table.
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.selection_mode = SelectionMode::Row;
-        self.selected_row = None;
+        self.row_selection.clear();
         self.selected_col = None;
         self.selected_cell = None;
         cx.emit(TableEvent::ClearSelection);
+        cx.emit(TableEvent::SelectionChanged);
         cx.notify();
     }
 
@@ -714,6 +866,7 @@ where
     ) {
         self.right_clicked_row = row_ix;
         self.right_clicked_cell = None;
+        self.right_clicked_header = None;
         cx.emit(TableEvent::RightClickedRow(row_ix));
     }
 
@@ -732,6 +885,7 @@ where
         cx.stop_propagation();
         self.right_clicked_cell = Some((row_ix, col_ix));
         self.right_clicked_row = None;
+        self.right_clicked_header = None;
         cx.emit(TableEvent::RightClickedCell(row_ix, col_ix));
     }
 
@@ -746,7 +900,14 @@ where
             return;
         }
 
-        self.set_selected_row(row_ix, cx);
+        let modifiers = if self.multi_select {
+            e.modifiers()
+        } else {
+            Modifiers::none()
+        };
+
+        cx.stop_propagation();
+        self.apply_row_selection(row_ix, modifiers, cx);
 
         if e.click_count() == 2 {
             cx.emit(TableEvent::DoubleClickedRow(row_ix));
@@ -807,7 +968,9 @@ where
     }
 
     fn has_selection(&self) -> bool {
-        self.selected_row.is_some() || self.selected_col.is_some() || self.selected_cell.is_some()
+        !self.row_selection.is_empty()
+            || self.selected_col.is_some()
+            || self.selected_cell.is_some()
     }
 
     pub(super) fn action_cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
@@ -848,16 +1011,49 @@ where
         }
 
         // Row selection mode
-        let mut selected_row = self.selected_row.unwrap_or(0);
-        if selected_row > 0 {
-            selected_row = selected_row.saturating_sub(1);
-        } else {
-            if self.loop_selection {
-                selected_row = rows_count.saturating_sub(1);
-            }
+        self.move_row_cursor(-1, Modifiers::none(), cx);
+    }
+
+    pub(super) fn action_select_prev_extend(
+        &mut self,
+        _: &SelectUpExtend,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection_mode.is_cell() {
+            cx.propagate();
+            return;
         }
 
-        self.set_selected_row(selected_row, cx);
+        self.move_row_cursor(-1, self.range_modifiers(), cx);
+    }
+
+    pub(super) fn action_select_next_extend(
+        &mut self,
+        _: &SelectDownExtend,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selection_mode.is_cell() {
+            cx.propagate();
+            return;
+        }
+
+        self.move_row_cursor(1, self.range_modifiers(), cx);
+    }
+
+    pub(super) fn action_select_all_rows(
+        &mut self,
+        _: &SelectAllRows,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.multi_select {
+            cx.propagate();
+            return;
+        }
+
+        self.select_all_rows(cx);
     }
 
     pub(super) fn action_select_next(
@@ -890,19 +1086,7 @@ where
         }
 
         // Row selection mode
-        let selected_row = match self.selected_row {
-            Some(selected_row) if selected_row < rows_count.saturating_sub(1) => selected_row + 1,
-            Some(selected_row) => {
-                if self.loop_selection {
-                    0
-                } else {
-                    selected_row
-                }
-            }
-            _ => 0,
-        };
-
-        self.set_selected_row(selected_row, cx);
+        self.move_row_cursor(1, Modifiers::none(), cx);
     }
 
     pub(super) fn action_select_first_column(
@@ -970,7 +1154,7 @@ where
         }
 
         // Row selection mode
-        let current = self.selected_row.unwrap_or(0);
+        let current = self.selected_row().unwrap_or(0);
         let target = current.saturating_sub(step);
         self.set_selected_row(target, cx);
     }
@@ -1002,7 +1186,7 @@ where
         }
 
         // Row selection mode
-        let current = self.selected_row.unwrap_or(0);
+        let current = self.selected_row().unwrap_or(0);
         let max_row = rows_count.saturating_sub(1);
         let target = (current + step).min(max_row);
         self.set_selected_row(target, cx);
@@ -1411,6 +1595,11 @@ where
                 cx.stop_propagation();
                 cx.new(|_| drag.clone())
             })
+            .on_click(cx.listener(move |_, e: &ClickEvent, _, cx| {
+                if e.click_count() == 2 {
+                    cx.emit(TableEvent::DoubleClickedResizeHandle(ix));
+                }
+            }))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|view, _, _, cx| {
@@ -1516,6 +1705,14 @@ where
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.on_col_head_click(col_ix, window, cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, _, _| {
+                            this.right_clicked_header = Some(col_ix);
+                            this.right_clicked_row = None;
+                            this.right_clicked_cell = None;
+                        }),
+                    )
                     .child(
                         h_flex()
                             .size_full()
@@ -1864,19 +2061,19 @@ where
         left_columns_count: usize,
         col_sizes: Rc<Vec<gpui::Size<Pixels>>>,
         columns_count: usize,
-        is_filled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let horizontal_scroll_handle = self.horizontal_scroll_handle.clone();
         let is_stripe_row = self.options.stripe && row_ix % 2 != 0;
-        let is_selected = self.selected_row == Some(row_ix);
+        let is_selected = self.row_selection.contains(row_ix);
+        let is_cursor_row = self.row_selection.cursor() == Some(row_ix);
+        let is_focused = self.focus_handle.contains_focused(window, cx);
         let view = cx.entity().clone();
         let row_height = self.options.size.table_row_height();
 
         if row_ix < rows_count {
-            let is_last_row = row_ix + 1 == rows_count;
-            let need_render_border = is_selected || !is_last_row || !is_filled;
+            let need_render_border = false;
 
             let mut tr = self.delegate.render_tr(row_ix, window, cx);
             let style = tr.style().clone();
@@ -1895,6 +2092,41 @@ where
                     } else {
                         this.bg(cx.theme().tokens.table_hover)
                     }
+                })
+                // Row selected style. Painted before the cells so the translucent
+                // fill sits *under* cell content — otherwise it tints images.
+                // Note: Don't show row selection if a cell is selected
+                .when(is_selected && self.selection_mode.is_row(), |this| {
+                    this.map(|this| {
+                        if cx.theme().list.active_highlight {
+                            // Focused tables get the louder colour so an
+                            // inactive table's selection reads as a memory of
+                            // where the cursor was rather than as live state.
+                            let (bg, border) = if is_focused {
+                                (cx.theme().table_focused, cx.theme().table_focused_border)
+                            } else {
+                                (cx.theme().table_active, cx.theme().table_active_border)
+                            };
+
+                            this.border_color(gpui::transparent_white()).child(
+                                div()
+                                    .top(if row_ix == 0 { px(0.) } else { px(-1.) })
+                                    .left(px(0.))
+                                    .right(px(0.))
+                                    .bottom(px(-1.))
+                                    .absolute()
+                                    .bg(bg)
+                                    .border_1()
+                                    .border_color(if is_cursor_row {
+                                        border
+                                    } else {
+                                        gpui::transparent_white()
+                                    }),
+                            )
+                        } else {
+                            this.bg(cx.theme().accent)
+                        }
+                    })
                 })
                 .when(self.cell_selectable && self.row_header, |this| {
                     this.child(self.render_row_header_cell(row_ix, false, cx))
@@ -2111,29 +2343,6 @@ where
                         )
                         .child(self.delegate.render_last_empty_col(window, cx)),
                 )
-                // Row selected style
-                // Note: Don't show row selection if a cell is selected
-                .when_some(self.selected_row, |this, _| {
-                    this.when(is_selected && self.selection_mode.is_row(), |this| {
-                        this.map(|this| {
-                            if cx.theme().list.active_highlight {
-                                this.border_color(gpui::transparent_white()).child(
-                                    div()
-                                        .top(if row_ix == 0 { px(0.) } else { px(-1.) })
-                                        .left(px(0.))
-                                        .right(px(0.))
-                                        .bottom(px(-1.))
-                                        .absolute()
-                                        .bg(cx.theme().tokens.table_active)
-                                        .border_1()
-                                        .border_color(cx.theme().table_active_border),
-                                )
-                            } else {
-                                this.bg(cx.theme().tokens.accent)
-                            }
-                        })
-                    })
-                })
                 // Row right click row style
                 .when(self.right_clicked_row == Some(row_ix), |this| {
                     this.border_color(gpui::transparent_white()).child(
@@ -2324,7 +2533,6 @@ where
             rows_count
         };
         let right_clicked_row = self.right_clicked_row;
-        let is_filled = total_height > Pixels::ZERO && total_height <= actual_height;
 
         let loading_view = if loading {
             Some(
@@ -2356,12 +2564,37 @@ where
                 let view = cx.entity().clone();
                 move |this, window: &mut Window, cx: &mut Context<PopupMenu>| {
                     if let Some(row_ix) = view.read(cx).right_clicked_row {
+                        view.update(cx, |table, cx| {
+                            let selected_rows = table.row_selection.rows().clone();
+                            table.delegate_mut().context_menu(
+                                row_ix,
+                                &selected_rows,
+                                this,
+                                window,
+                                cx,
+                            )
+                        })
+                    } else if let Some(col_ix) = view.read(cx).right_clicked_header {
                         view.update(cx, |menu, cx| {
-                            menu.delegate_mut().context_menu(row_ix, this, window, cx)
+                            menu.delegate_mut()
+                                .header_context_menu(col_ix, this, window, cx)
                         })
                     } else {
                         this
                     }
+                }
+            })
+            .handle(self.context_menu.clone())
+            .action_context(self.focus_handle.clone())
+            .on_dismiss({
+                let view = cx.entity().clone();
+                move |_window, cx| {
+                    view.update(cx, |table, cx| {
+                        table.right_clicked_row = None;
+                        table.right_clicked_header = None;
+                        cx.emit(TableEvent::RightClickedRow(None));
+                        cx.notify();
+                    })
                 }
             })
             .map(|this| {
@@ -2426,7 +2659,6 @@ where
                                                 left_columns_count,
                                                 col_sizes.clone(),
                                                 columns_count,
-                                                is_filled,
                                                 window,
                                                 cx,
                                             ));

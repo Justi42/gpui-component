@@ -141,6 +141,24 @@ pub enum CalendarView {
     Month,
     Year,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Granularity {
+    #[default]
+    Day,
+    Month,
+    Year,
+}
+
+impl Granularity {
+    fn view(self) -> CalendarView {
+        match self {
+            Self::Day => CalendarView::Day,
+            Self::Month => CalendarView::Month,
+            Self::Year => CalendarView::Year,
+        }
+    }
+}
 impl CalendarView {
     pub fn is_day(self) -> bool {
         self == Self::Day
@@ -176,6 +194,7 @@ pub struct CalendarState {
     today: NaiveDate,
     number_of_months: usize,
     disabled_matcher: Option<Rc<Matcher>>,
+    granularity: Granularity,
 }
 
 impl CalendarState {
@@ -192,6 +211,7 @@ impl CalendarState {
             today,
             number_of_months: 1,
             disabled_matcher: None,
+            granularity: Granularity::Day,
         }
         .year_range((today.year() - 50, today.year() + 50))
     }
@@ -274,6 +294,19 @@ impl CalendarState {
     }
     pub fn number_of_months(&self) -> usize {
         self.number_of_months
+    }
+    pub fn granularity(&self) -> Granularity {
+        self.granularity
+    }
+    pub fn set_granularity(
+        &mut self,
+        granularity: Granularity,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.granularity = granularity;
+        self.view = granularity.view();
+        cx.notify();
     }
     pub fn year_range(mut self, range: (i32, i32)) -> Self {
         self.apply_year_range(range);
@@ -384,6 +417,37 @@ impl CalendarState {
     pub fn select_year(&mut self, year: i32) {
         self.current_year = year;
         self.view = CalendarView::Day;
+    }
+
+    fn select_at_granularity(&mut self, cx: &mut Context<Self>) {
+        let date = match self.granularity {
+            Granularity::Year => NaiveDate::from_ymd_opt(self.current_year, 1, 1),
+            Granularity::Month => {
+                NaiveDate::from_ymd_opt(self.current_year, self.current_month as u32, 1)
+            }
+            Granularity::Day => return,
+        };
+        self.apply_date(Date::Single(date));
+        cx.emit(CalendarEvent::Selected(self.date));
+        cx.notify();
+    }
+
+    fn activate_month(&mut self, month: u8, cx: &mut Context<Self>) {
+        self.current_month = month;
+        if self.granularity == Granularity::Month {
+            self.select_at_granularity(cx);
+        } else {
+            self.view = CalendarView::Day;
+        }
+    }
+
+    fn activate_year(&mut self, year: i32, cx: &mut Context<Self>) {
+        self.current_year = year;
+        if self.granularity == Granularity::Year {
+            self.select_at_granularity(cx);
+        } else {
+            self.view = CalendarView::Day;
+        }
     }
 }
 impl EventEmitter<CalendarEvent> for CalendarState {}
@@ -776,7 +840,7 @@ impl RenderOnce for Calendar {
                     .child((self.label)(st.kind(), month as i32))
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |s, cx| {
-                            s.select_month(month);
+                            s.activate_month(month, cx);
                             cx.notify();
                         })
                     });
@@ -792,7 +856,7 @@ impl RenderOnce for Calendar {
                     .child((self.label)(st.kind(), year))
                     .on_click(move |_, _, cx| {
                         entity.update(cx, |s, cx| {
-                            s.select_year(year);
+                            s.activate_year(year, cx);
                             cx.notify();
                         })
                     });

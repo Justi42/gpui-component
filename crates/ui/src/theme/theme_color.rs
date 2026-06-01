@@ -197,6 +197,8 @@ pub struct ThemeColor {
     pub popover: Hsla,
     /// Text color for Popover.
     pub popover_foreground: Hsla,
+    /// Border of a popover.
+    pub popover_border: Hsla,
     /// Primary background color.
     pub primary: Hsla,
     /// Active primary background color.
@@ -231,6 +233,8 @@ pub struct ThemeColor {
     pub sidebar_accent: Hsla,
     /// Sidebar accent text color.
     pub sidebar_accent_foreground: Hsla,
+    /// Sidebar hover background color.
+    pub sidebar_hover: Hsla,
     /// Sidebar border color.
     pub sidebar_border: Hsla,
     /// Sidebar text color.
@@ -275,6 +279,13 @@ pub struct ThemeColor {
     pub table_active: Hsla,
     /// Table active item border color.
     pub table_active_border: Hsla,
+    /// Table selected row background color while the table has focus.
+    ///
+    /// Only used by the `list.active_highlight` style; falls back to
+    /// `table_active`, which stays in use for unfocused tables.
+    pub table_focused: Hsla,
+    /// Table selected row border color while the table has focus.
+    pub table_focused_border: Hsla,
     /// Stripe background color for even TableRow.
     pub table_even: Hsla,
     /// Table head background color.
@@ -309,6 +320,14 @@ pub struct ThemeColor {
     pub warning_foreground: Hsla,
     /// Overlay background color.
     pub overlay: Hsla,
+    /// Subtle overlay · separators · dividers.
+    pub overlay0: Hsla,
+    /// Labels · kbd · icon defaults.
+    pub overlay1: Hsla,
+    /// Helper copy · field hints.
+    pub subtext0: Hsla,
+    /// Secondary text · cell values.
+    pub subtext1: Hsla,
     /// Window border color.
     ///
     /// # Platform specific:

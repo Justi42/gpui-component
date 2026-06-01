@@ -77,7 +77,7 @@ pub use avatar::{Avatar, AvatarFallback, AvatarImage};
 pub use button::{Button, ButtonStyles};
 pub use calendar::{
     Calendar, CalendarEvent, CalendarItem, CalendarItemKind, CalendarItemState, CalendarState,
-    CalendarView, Date, IntervalMatcher, Matcher, RangeMatcher,
+    CalendarView, Date, Granularity, IntervalMatcher, Matcher, RangeMatcher,
 };
 pub use checkbox::{
     Checkbox, CheckboxIndicator, CheckboxIndicatorStyles, CheckboxState, CheckboxStyles,

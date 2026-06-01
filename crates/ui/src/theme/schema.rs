@@ -460,6 +460,9 @@ pub struct ThemeConfigColors {
     /// Text color for Popover.
     #[serde(rename = "popover.foreground")]
     pub popover_foreground: Option<SharedString>,
+    /// Border color for Popover.
+    #[serde(rename = "popover.border")]
+    pub popover_border: Option<SharedString>,
     /// Primary background color.
     #[serde(rename = "primary.background")]
     pub primary: Option<SharedString>,
@@ -511,6 +514,9 @@ pub struct ThemeConfigColors {
     /// Sidebar accent text color.
     #[serde(rename = "sidebar.accent.foreground")]
     pub sidebar_accent_foreground: Option<SharedString>,
+    /// Sidebar hover background color.
+    #[serde(rename = "sidebar.hover")]
+    pub sidebar_hover: Option<SharedString>,
     /// Sidebar border color.
     #[serde(rename = "sidebar.border")]
     pub sidebar_border: Option<SharedString>,
@@ -577,6 +583,12 @@ pub struct ThemeConfigColors {
     /// Table active item border color.
     #[serde(rename = "table.active.border")]
     pub table_active_border: Option<SharedString>,
+    /// Table selected row background color while focused.
+    #[serde(rename = "table.focused.background")]
+    pub table_focused: Option<SharedString>,
+    /// Table selected row border color while focused.
+    #[serde(rename = "table.focused.border")]
+    pub table_focused_border: Option<SharedString>,
     /// Stripe background color for even TableRow.
     #[serde(rename = "table.even.background")]
     pub table_even: Option<SharedString>,
@@ -628,6 +640,18 @@ pub struct ThemeConfigColors {
     /// Overlay background color.
     #[serde(rename = "overlay")]
     pub overlay: Option<SharedString>,
+    /// Subtle overlay color.
+    #[serde(rename = "overlay0")]
+    pub overlay0: Option<SharedString>,
+    /// Label and icon overlay color.
+    #[serde(rename = "overlay1")]
+    pub overlay1: Option<SharedString>,
+    /// Helper text color.
+    #[serde(rename = "subtext0")]
+    pub subtext0: Option<SharedString>,
+    /// Secondary text color.
+    #[serde(rename = "subtext1")]
+    pub subtext1: Option<SharedString>,
     /// Window border color.
     ///
     /// # Platform specific:
@@ -1015,6 +1039,23 @@ impl ThemeColor {
         apply_background_color!(tiles, fallback = tokens.background);
         apply_background_color!(overlay);
         apply_color!(window_border, fallback = self.border);
+
+        let configured = |value: &Option<SharedString>, fallback| {
+            value
+                .as_ref()
+                .and_then(|value| try_parse_color(value).ok())
+                .unwrap_or(fallback)
+        };
+        self.popover_border = configured(&colors.popover_border, self.border);
+        self.sidebar_hover = configured(&colors.sidebar_hover, self.sidebar_accent.opacity(0.5));
+        self.table_focused = configured(&colors.table_focused, self.table_active);
+        self.table_focused_border =
+            configured(&colors.table_focused_border, self.table_active_border);
+        self.overlay0 = configured(&colors.overlay0, self.border);
+        self.overlay1 = configured(&colors.overlay1, self.muted_foreground.opacity(0.7));
+        self.subtext0 = configured(&colors.subtext0, self.muted_foreground.opacity(0.85));
+        self.subtext1 = configured(&colors.subtext1, self.muted_foreground);
+        self.table_focused = self.table_focused.alpha(self.table_focused.a.min(0.2));
 
         // TODO: Apply default fallback colors to highlight.
 

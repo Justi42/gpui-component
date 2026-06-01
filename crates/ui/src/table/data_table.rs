@@ -1,8 +1,8 @@
 use crate::{
     ActiveTheme, Sizable, Size,
     actions::{
-        Cancel, SelectDown, SelectFirst, SelectLast, SelectNextColumn, SelectPageDown,
-        SelectPageUp, SelectPrevColumn, SelectUp,
+        Cancel, SelectAllRows, SelectDown, SelectDownExtend, SelectFirst, SelectLast,
+        SelectNextColumn, SelectPageDown, SelectPageUp, SelectPrevColumn, SelectUp, SelectUpExtend,
     },
     table::{TableDelegate, TableState},
 };
@@ -17,6 +17,12 @@ pub(super) fn init(cx: &mut App) {
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
         KeyBinding::new("up", SelectUp, Some(CONTEXT)),
         KeyBinding::new("down", SelectDown, Some(CONTEXT)),
+        KeyBinding::new("shift-up", SelectUpExtend, Some(CONTEXT)),
+        KeyBinding::new("shift-down", SelectDownExtend, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-a", SelectAllRows, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-a", SelectAllRows, Some(CONTEXT)),
         KeyBinding::new("left", SelectPrevColumn, Some(CONTEXT)),
         KeyBinding::new("right", SelectNextColumn, Some(CONTEXT)),
         KeyBinding::new("home", SelectFirst, Some(CONTEXT)),
@@ -156,6 +162,9 @@ where
             .on_action(window.listener_for(&self.state, TableState::action_cancel))
             .on_action(window.listener_for(&self.state, TableState::action_select_next))
             .on_action(window.listener_for(&self.state, TableState::action_select_prev))
+            .on_action(window.listener_for(&self.state, TableState::action_select_next_extend))
+            .on_action(window.listener_for(&self.state, TableState::action_select_prev_extend))
+            .on_action(window.listener_for(&self.state, TableState::action_select_all_rows))
             .on_action(window.listener_for(&self.state, TableState::action_select_next_col))
             .on_action(window.listener_for(&self.state, TableState::action_select_prev_col))
             .on_action(window.listener_for(&self.state, TableState::action_select_first_column))

@@ -8,7 +8,7 @@ use rust_i18n::t;
 use crate::{ActiveTheme, Icon, IconName, Sizable, Size, StyledExt as _};
 
 use gpui_base::{Calendar as BaseCalendar, CalendarItemKind};
-pub use gpui_base::{CalendarEvent, CalendarState, Date, Matcher};
+pub use gpui_base::{CalendarEvent, CalendarState, Date, Granularity, Matcher};
 
 fn month_name(month: i32) -> SharedString {
     match month {

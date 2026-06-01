@@ -19,7 +19,7 @@ use crate::{
     v_flex,
 };
 
-use super::calendar::{Calendar, CalendarEvent, CalendarState, Date, Matcher};
+use super::calendar::{Calendar, CalendarEvent, CalendarState, Date, Granularity, Matcher};
 use gpui_base::{DatePicker as BaseDatePicker, ElementExt as _};
 
 const CONTEXT: &'static str = "DatePicker";
@@ -184,6 +184,19 @@ impl DatePickerState {
         });
     }
 
+    /// Set the finest selectable level of the internal calendar, turning the picker
+    /// into a month- or year-picker. Coarser components floor to the 1st / January.
+    pub fn set_granularity(
+        &mut self,
+        granularity: Granularity,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.calendar.update(cx, |state, cx| {
+            state.set_granularity(granularity, window, cx);
+        });
+    }
+
     fn update_date(&mut self, date: Date, emit: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.date = date;
         self.calendar.update(cx, |view, cx| {
@@ -278,6 +291,7 @@ pub struct DatePicker {
     style: StyleRefinement,
     state: Entity<DatePickerState>,
     cleanable: bool,
+    clean_on_hover: bool,
     placeholder: Option<SharedString>,
     size: Size,
     number_of_months: usize,
@@ -336,6 +350,7 @@ impl DatePicker {
             id: ("date-picker", state.entity_id()).into(),
             state: state.clone(),
             cleanable: false,
+            clean_on_hover: false,
             placeholder: None,
             size: Size::default(),
             style: StyleRefinement::default(),
@@ -356,6 +371,14 @@ impl DatePicker {
     /// Set whether to show the clear button when the input field is not empty, default is false.
     pub fn cleanable(mut self, cleanable: bool) -> Self {
         self.cleanable = cleanable;
+        self
+    }
+
+    /// When cleanable, reveal the clear button only while the picker is hovered
+    /// (like a hover-reveal action icon) rather than showing it whenever a value is
+    /// set. Default is false.
+    pub fn clean_on_hover(mut self, clean_on_hover: bool) -> Self {
+        self.clean_on_hover = clean_on_hover;
         self
     }
 
@@ -393,10 +416,15 @@ impl RenderOnce for DatePicker {
             .placeholder
             .clone()
             .unwrap_or_else(|| t!("DatePicker.placeholder").into());
-        let display_title = state
-            .date
-            .format(&state.date_format)
-            .unwrap_or(placeholder.clone());
+        // The displayed date truncates to the calendar's granularity, so a
+        // year-precision date reads "2010" and a month one "2010/11" rather than a
+        // full date that implies a day the value doesn't carry.
+        let format = match state.calendar.read(cx).granularity() {
+            Granularity::Year => "%Y",
+            Granularity::Month => "%Y/%m",
+            Granularity::Day => state.date_format.as_ref(),
+        };
+        let display_title = state.date.format(format).unwrap_or(placeholder.clone());
 
         let (bg, fg) = input_style(self.disabled, cx);
 
@@ -448,7 +476,11 @@ impl RenderOnce for DatePicker {
                         |this| this.focus_ring_style(window, cx),
                     )
                     .input_text_size(self.size)
-                    .input_size(self.size)
+                    // Only the bordered appearance gets input padding; a minimal
+                    // (appearance = false) picker sits flush so its text lines up
+                    // with adjacent plain-text rows.
+                    .when(self.appearance, |this| this.input_size(self.size))
+                    .group("date-picker")
                     .when(!state.open && !self.disabled, |this| {
                         this.on_click(
                             window.listener_for(&self.state, DatePickerState::toggle_calendar),
@@ -476,18 +508,30 @@ impl RenderOnce for DatePicker {
                                     .child(display_title),
                             )
                             .when(!self.disabled, |this| {
-                                this.when(show_clean, |this| {
-                                    this.child(clear_button(cx).on_click(
-                                        window.listener_for(&self.state, DatePickerState::clean),
-                                    ))
-                                })
-                                .when(!show_clean, |this| {
-                                    this.child(
-                                        Icon::new(IconName::Calendar)
-                                            .xsmall()
-                                            .text_color(cx.theme().muted_foreground),
-                                    )
-                                })
+                                let clear = clear_button(cx).on_click(
+                                    window.listener_for(&self.state, DatePickerState::clean),
+                                );
+                                let calendar = Icon::new(IconName::Calendar)
+                                    .xsmall()
+                                    .text_color(cx.theme().muted_foreground);
+                                if self.clean_on_hover {
+                                    // Like a hover-reveal action icon: the clear
+                                    // button only appears while the picker is
+                                    // hovered; an empty picker still shows the
+                                    // calendar affordance.
+                                    this.when(show_clean, |this| {
+                                        this.child(
+                                            div()
+                                                .opacity(0.)
+                                                .group_hover("date-picker", |d| d.opacity(1.))
+                                                .child(clear),
+                                        )
+                                    })
+                                    .when(!show_clean, |this| this.child(calendar))
+                                } else {
+                                    this.when(show_clean, |this| this.child(clear))
+                                        .when(!show_clean, |this| this.child(calendar))
+                                }
                             }),
                     ),
             )

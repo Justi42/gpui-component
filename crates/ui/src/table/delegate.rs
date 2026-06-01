@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{collections::HashSet, ops::Range};
 
 use gpui::{
     App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
@@ -98,9 +98,24 @@ pub trait TableDelegate: Sized + 'static {
     }
 
     /// Render the context menu for the row at the given row index.
+    ///
+    /// `selected_rows` is the live selection, so a delegate can offer bulk
+    /// actions when the right-clicked row is part of a multi-row selection.
     fn context_menu(
         &mut self,
         row_ix: usize,
+        selected_rows: &HashSet<usize>,
+        menu: PopupMenu,
+        window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        menu
+    }
+
+    /// Render the context menu for the column header at the given column index.
+    fn header_context_menu(
+        &mut self,
+        col_ix: usize,
         menu: PopupMenu,
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,

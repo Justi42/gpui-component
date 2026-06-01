@@ -1448,7 +1448,6 @@ impl Element for Scrollbar {
         let mode = self.mode.unwrap_or(theme.scrollbar.mode());
         let view_id = window.current_view();
         let hitbox_bounds = prepaint.hitbox.bounds;
-        let is_hover_to_show = mode.is_hover();
 
         window.with_content_mask(
             Some(ContentMask {
@@ -1587,11 +1586,8 @@ impl Element for Scrollbar {
 
                         move |event: &MouseMoveEvent, _, _, cx| {
                             let mut notify = false;
-                            // When is hover to show mode or it was visible,
-                            // we need to update the hovered state and increase the last_scroll_time.
-                            let need_hover_to_update = is_hover_to_show || is_visible;
                             // Update hovered state for scrollbar
-                            if bounds.contains(&event.position) && need_hover_to_update {
+                            if bounds.contains(&event.position) {
                                 let hover_changed = state.get().hovered_axis != Some(axis);
                                 state.set(state.get().with_hovered(Some(axis), Instant::now()));
                                 notify |= hover_changed;

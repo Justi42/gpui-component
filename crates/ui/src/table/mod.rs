@@ -4,6 +4,7 @@ mod column;
 mod data_table;
 mod delegate;
 mod loading;
+mod selection;
 mod state;
 mod table;
 

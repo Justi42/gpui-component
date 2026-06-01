@@ -267,7 +267,8 @@ impl AlertDialog {
 
     /// Build the styled dialog surface around the Base alert-dialog host.
     pub(crate) fn build_surface(self, window: &mut Window, cx: &mut App) -> Dialog {
-        let button_props = self.button_props.clone();
+        let mut button_props = self.button_props.clone();
+        button_props.on_close = self.base.button_props.on_close.clone();
         let has_title = self.icon.is_some() || self.title.is_some();
         let has_header = has_title || self.description.is_some();
         let has_footer = self.base.footer.is_some();
